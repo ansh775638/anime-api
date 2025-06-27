@@ -3,6 +3,7 @@ import { getCachedData, setCachedData } from "../helper/cache.helper.js";
 import { getInternalIdFromAnilistId, isAnilistId } from "../helper/anilistMapper.helper.js";
 
 export const getEpisodes = async (req, res) => {
+  console.log(`[EpisodeList] Request received with ID: ${req.params.id}`);
   const { id } = req.params;
   // const cacheKey = `episodes_${id}`;
   
@@ -13,20 +14,20 @@ export const getEpisodes = async (req, res) => {
     // Check if this is an AniList ID (numeric only)
     if (isAnilistId(id)) {
       isAnilist = true;
-      console.log(`Processing request for AniList ID: ${id}`);
+      console.log(`[EpisodeList] Processing request for AniList ID: ${id}`);
       
       // Convert AniList ID to internal ID
       const mappedId = await getInternalIdFromAnilistId(id);
       
       if (!mappedId) {
-        console.error(`No anime found with AniList ID: ${id}`);
+        console.error(`[EpisodeList] No anime found with AniList ID: ${id}`);
         return { 
           success: false, 
           message: `No anime found with AniList ID: ${id}. The anime might not be available on this source.` 
         };
       }
       
-      console.log(`AniList ID ${id} mapped to internal ID: ${mappedId}`);
+      console.log(`[EpisodeList] AniList ID ${id} mapped to internal ID: ${mappedId}`);
       internalId = mappedId;
     }
     
@@ -35,12 +36,12 @@ export const getEpisodes = async (req, res) => {
     //   return cachedResponse;
     // }
     
-    console.log(`Fetching episodes for ID: ${internalId}`);
+    console.log(`[EpisodeList] Fetching episodes for ID: ${internalId}`);
     const data = await extractEpisodesList(encodeURIComponent(internalId));
     
     if (!data || (Array.isArray(data) && data.length === 0) || 
         (typeof data === 'object' && Object.keys(data).length === 0)) {
-      console.error(`No episodes found for ID: ${internalId}`);
+      console.error(`[EpisodeList] No episodes found for ID: ${internalId}`);
       return {
         success: false,
         message: isAnilist 
@@ -48,6 +49,9 @@ export const getEpisodes = async (req, res) => {
           : `Episodes not found for ID: ${id}`
       };
     }
+    
+    console.log(`[EpisodeList] Successfully fetched episodes for ID: ${internalId}`);
+    console.log(`[EpisodeList] Episode count: ${data.totalEpisodes || 'unknown'}`);
     
     // If this was an AniList ID request, make sure to include it in the response
     if (isAnilist && !data.anilistId) {
@@ -64,7 +68,7 @@ export const getEpisodes = async (req, res) => {
       results: data
     };
   } catch (e) {
-    console.error("Error fetching episodes:", e);
+    console.error("[EpisodeList] Error fetching episodes:", e);
     return {
       success: false,
       message: e.message || "An error occurred while fetching episodes"

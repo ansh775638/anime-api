@@ -21,6 +21,9 @@ import getCharacter from "../controllers/characters.controller.js";
 import * as filterController from "../controllers/filter.controller.js";
 import getTopSearch from "../controllers/topsearch.controller.js";
 
+// Import a direct mapping controller for AniList IDs
+import * as anilistController from "../controllers/anilist.controller.js";
+
 export const createApiRoutes = (app, jsonResponse, jsonError) => {
   const createRoute = (path, controllerMethod) => {
     app.get(path, async (req, res) => {
@@ -63,7 +66,8 @@ export const createApiRoutes = (app, jsonResponse, jsonError) => {
   createRoute("/api/top-ten", topTenController.getTopTen);
   createRoute("/api/info", animeInfoController.getAnimeInfo);
   createRoute("/api/episodes/:id", episodeListController.getEpisodes);
-  createRoute("/api/anilist/episodes/:id", episodeListController.getEpisodes);
+  // Direct AniList routes
+  createRoute("/api/anilist/episodes/:id", anilistController.getEpisodesByAnilistId);
   createRoute("/api/servers/:id", serversController.getServers);
   createRoute("/api/stream", streamController.getStreamInfo);
   createRoute("/api/search", searchController.search);

@@ -49,6 +49,7 @@ async function findInternalIdFromAnilist(anilistId) {
           synonyms
           seasonYear
           season
+          genres
         }
       }
     `;
@@ -65,20 +66,71 @@ async function findInternalIdFromAnilist(anilistId) {
     const animeData = anilistResponse.data.data.Media;
     console.log(`[AniList] Found anime in AniList: ${animeData.title.english || animeData.title.romaji}`);
     
+    // Additional step: Try to use MAL ID if available (many sites use these)
+    if (animeData.idMal) {
+      try {
+        console.log(`[AniList] Trying to use MAL ID: ${animeData.idMal}`);
+        const malSearchUrl = `https://${v1_base_url}/search?keyword=id:${animeData.idMal}`;
+        
+        const { data } = await axios.get(malSearchUrl);
+        const $ = cheerio.load(data);
+        
+        const animeItems = $('.flw-item');
+        if (animeItems.length > 0) {
+          const firstItem = animeItems.first();
+          const link = firstItem.find('.film-poster').attr('href');
+          
+          if (link) {
+            const internalId = link.split('/').pop();
+            console.log(`[AniList] Found via MAL ID: ${internalId}`);
+            
+            // Store in cache for future use
+            ANILIST_CACHE.set(anilistId, internalId);
+            
+            return internalId;
+          }
+        }
+      } catch (error) {
+        console.error(`[AniList] Error searching via MAL ID:`, error.message);
+      }
+    }
+    
     // Prepare all possible search terms
     const searchTerms = [
       animeData.title.english,
       animeData.title.romaji,
+      animeData.title.native,
       ...(animeData.synonyms || [])
     ].filter(Boolean);
     
-    // Add the first part of titles (for cases like "One Piece Movie 14: Stampede" -> "One Piece")
-    const titleFirstParts = searchTerms
-      .map(term => term?.split(':')[0]?.trim())
-      .filter(term => term && term.includes(' ') && !searchTerms.includes(term));
+    // Add additional search variations
+    const variations = [];
     
-    // Combine all search terms
-    const allSearchTerms = [...searchTerms, ...titleFirstParts];
+    // Add the first part of titles (for cases like "One Piece Movie 14: Stampede" -> "One Piece")
+    searchTerms.forEach(term => {
+      if (!term) return;
+      
+      // Split by colon for titles like "Series: Subtitle"
+      const colonSplit = term.split(':')[0].trim();
+      if (colonSplit && colonSplit !== term && colonSplit.includes(' ')) {
+        variations.push(colonSplit);
+      }
+      
+      // Split by hyphen for titles like "Series - Subtitle"
+      const hyphenSplit = term.split('-')[0].trim();
+      if (hyphenSplit && hyphenSplit !== term && hyphenSplit.includes(' ')) {
+        variations.push(hyphenSplit);
+      }
+      
+      // Split by season markers like S2, Season 2, etc.
+      const seasonSplit = term.split(/\s+Season\s+\d+/i)[0].trim();
+      if (seasonSplit && seasonSplit !== term) {
+        variations.push(seasonSplit);
+      }
+    });
+    
+    // Combine all search terms and remove duplicates
+    const allSearchTerms = [...new Set([...searchTerms, ...variations])];
     
     console.log(`[AniList] Search terms: ${JSON.stringify(allSearchTerms)}`);
     
@@ -122,6 +174,21 @@ async function findInternalIdFromAnilist(anilistId) {
               ANILIST_CACHE.set(anilistId, anime.id);
               
               return anime.id;
+            }
+          }
+          
+          // Try to match by year if available
+          if (animeData.seasonYear) {
+            for (const anime of foundAnimes) {
+              // Check if the title contains the year
+              if (anime.title.includes(animeData.seasonYear.toString())) {
+                console.log(`[AniList] Found year match (${animeData.seasonYear}): "${anime.title}" with ID: ${anime.id}`);
+                
+                // Store in cache for future use
+                ANILIST_CACHE.set(anilistId, anime.id);
+                
+                return anime.id;
+              }
             }
           }
           

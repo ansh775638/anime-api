@@ -21,6 +21,7 @@ const ANILIST_ID_MAPPING = {
   "99423": "dr-stone", // Dr. Stone
   "98707": "black-clover", // Black Clover
   "11757": "sword-art-online", // Sword Art Online
+  "124": "fushigi-yuugi-eikoden", // Fushigi Yuugi: Eikoden (Mysterious Play: Eikoden)
 };
 
 /**
@@ -32,7 +33,7 @@ async function findInternalIdFromAnilist(anilistId) {
   try {
     console.log(`[AniList] Searching for anime with AniList ID: ${anilistId}`);
     
-    // Get anime details from AniList API
+    // Get anime details from AniList API with more info
     const anilistQuery = `
       query {
         Media(id: ${anilistId}, type: ANIME) {
@@ -45,6 +46,9 @@ async function findInternalIdFromAnilist(anilistId) {
           }
           format
           status
+          synonyms
+          seasonYear
+          season
         }
       }
     `;
@@ -61,14 +65,27 @@ async function findInternalIdFromAnilist(anilistId) {
     const animeData = anilistResponse.data.data.Media;
     console.log(`[AniList] Found anime in AniList: ${animeData.title.english || animeData.title.romaji}`);
     
-    // Try all possible title variants
+    // Prepare all possible search terms
     const searchTerms = [
       animeData.title.english,
-      animeData.title.romaji
+      animeData.title.romaji,
+      ...(animeData.synonyms || [])
     ].filter(Boolean);
     
+    // Add the first part of titles (for cases like "One Piece Movie 14: Stampede" -> "One Piece")
+    const titleFirstParts = searchTerms
+      .map(term => term?.split(':')[0]?.trim())
+      .filter(term => term && term.includes(' ') && !searchTerms.includes(term));
+    
+    // Combine all search terms
+    const allSearchTerms = [...searchTerms, ...titleFirstParts];
+    
+    console.log(`[AniList] Search terms: ${JSON.stringify(allSearchTerms)}`);
+    
     // Try each search term
-    for (const term of searchTerms) {
+    for (const term of allSearchTerms) {
+      if (!term) continue;
+      
       try {
         const encodedTerm = encodeURIComponent(term);
         const searchUrl = `https://${v1_base_url}/search?keyword=${encodedTerm}`;
@@ -83,19 +100,39 @@ async function findInternalIdFromAnilist(anilistId) {
         if (resultCount > 0) {
           console.log(`[AniList] Found ${resultCount} results for "${term}"`);
           
-          // Extract the first result (most relevant)
-          const firstItem = animeItems.first();
-          const title = firstItem.find('.film-detail .film-name').text().trim();
-          const link = firstItem.find('.film-poster').attr('href');
+          // Extract all found titles for comparison
+          const foundAnimes = [];
+          animeItems.each((i, el) => {
+            const title = $(el).find('.film-detail .film-name').text().trim();
+            const link = $(el).find('.film-poster').attr('href');
+            if (link) {
+              const id = link.split('/').pop();
+              foundAnimes.push({ title, id });
+            }
+          });
           
-          if (link) {
-            const internalId = link.split('/').pop();
-            console.log(`[AniList] Found anime: "${title}" with ID: ${internalId}`);
+          console.log(`[AniList] Extracted ${foundAnimes.length} anime titles: ${JSON.stringify(foundAnimes.map(a => a.title))}`);
+          
+          // Try to find the best match
+          for (const anime of foundAnimes) {
+            if (isReasonableMatch(anime.title, term)) {
+              console.log(`[AniList] Found matching anime: "${anime.title}" with ID: ${anime.id}`);
+              
+              // Store in cache for future use
+              ANILIST_CACHE.set(anilistId, anime.id);
+              
+              return anime.id;
+            }
+          }
+          
+          // If no good match, just return the first result
+          if (foundAnimes.length > 0) {
+            console.log(`[AniList] No exact match found, using first result: "${foundAnimes[0].title}" with ID: ${foundAnimes[0].id}`);
             
             // Store in cache for future use
-            ANILIST_CACHE.set(anilistId, internalId);
+            ANILIST_CACHE.set(anilistId, foundAnimes[0].id);
             
-            return internalId;
+            return foundAnimes[0].id;
           }
         }
       } catch (error) {
@@ -110,6 +147,83 @@ async function findInternalIdFromAnilist(anilistId) {
     console.error(`[AniList] Error in findInternalIdFromAnilist:`, error.message);
     return null;
   }
+}
+
+/**
+ * Helper function to determine if two titles are a reasonable match
+ * @param {string} title1 - First title
+ * @param {string} title2 - Second title
+ * @returns {boolean} - True if titles are a reasonable match
+ */
+function isReasonableMatch(title1, title2) {
+  if (!title1 || !title2) return false;
+  
+  // Normalize titles for comparison
+  const normalize = (str) => str.toLowerCase().replace(/[^a-z0-9]/g, '');
+  
+  const normalizedTitle1 = normalize(title1);
+  const normalizedTitle2 = normalize(title2);
+  
+  // Log the comparison for debugging
+  console.log(`[AniList] Comparing titles: "${title1}" vs "${title2}"`);
+  console.log(`[AniList] Normalized: "${normalizedTitle1}" vs "${normalizedTitle2}"`);
+  
+  // Direct match
+  if (normalizedTitle1 === normalizedTitle2) {
+    console.log('[AniList] Direct match found');
+    return true;
+  }
+  
+  // Check if title1 contains title2 or vice versa
+  if (normalizedTitle1.includes(normalizedTitle2) || normalizedTitle2.includes(normalizedTitle1)) {
+    console.log('[AniList] Substring match found');
+    return true;
+  }
+  
+  // Calculate similarity score
+  const longerLength = Math.max(normalizedTitle1.length, normalizedTitle2.length);
+  if (longerLength === 0) return true;
+  
+  // Calculate Levenshtein distance
+  const distance = levenshteinDistance(normalizedTitle1, normalizedTitle2);
+  const similarityScore = (longerLength - distance) / longerLength;
+  
+  console.log(`[AniList] Similarity score: ${similarityScore}`);
+  
+  // Consider a match if similarity is high enough
+  return similarityScore > 0.7;
+}
+
+/**
+ * Calculate Levenshtein distance between two strings
+ * @param {string} str1 - First string
+ * @param {string} str2 - Second string
+ * @returns {number} - Levenshtein distance
+ */
+function levenshteinDistance(str1, str2) {
+  const track = Array(str2.length + 1).fill(null).map(() => 
+    Array(str1.length + 1).fill(null));
+  
+  for (let i = 0; i <= str1.length; i += 1) {
+    track[0][i] = i;
+  }
+  
+  for (let j = 0; j <= str2.length; j += 1) {
+    track[j][0] = j;
+  }
+  
+  for (let j = 1; j <= str2.length; j += 1) {
+    for (let i = 1; i <= str1.length; i += 1) {
+      const indicator = str1[i - 1] === str2[j - 1] ? 0 : 1;
+      track[j][i] = Math.min(
+        track[j][i - 1] + 1, // deletion
+        track[j - 1][i] + 1, // insertion
+        track[j - 1][i - 1] + indicator, // substitution
+      );
+    }
+  }
+  
+  return track[str2.length][str1.length];
 }
 
 /**

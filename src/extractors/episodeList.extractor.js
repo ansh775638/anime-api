@@ -16,10 +16,33 @@ async function extractEpisodesList(id) {
     );
     if (!response.data.html) return [];
     const $ = cheerio.load(response.data.html);
+    
+    // Get the show info page to extract AniList ID if available
+    const showInfoResponse = await axios.get(`https://${v1_base_url}/${id}`);
+    const showInfo$ = cheerio.load(showInfoResponse.data);
+    
+    // Try to extract AniList ID from syncData script
+    let anilistId = null;
+    const syncDataScript = showInfo$("#syncData").html();
+    if (syncDataScript) {
+      try {
+        const syncData = JSON.parse(syncDataScript);
+        anilistId = syncData.anilist_id || null;
+      } catch (error) {
+        console.error("Error parsing syncData:", error);
+      }
+    }
+    
     const res = {
       totalEpisodes: 0,
       episodes: [],
     };
+    
+    // Add AniList ID to response if available
+    if (anilistId) {
+      res.anilistId = anilistId;
+    }
+    
     res.totalEpisodes = Number($(".detail-infor-content .ss-list a").length);
     $(".detail-infor-content .ss-list a").each((_, el) => {
       res.episodes.push({

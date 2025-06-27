@@ -17,378 +17,280 @@ const ANILIST_ID_MAPPING = {
   "1535": "death-note", // Death Note
   "113415": "jujutsu-kaisen", // Jujutsu Kaisen
   "20": "naruto-shippuden", // Naruto Shippuden
-  "15125": "tokyo-ghoul", // Tokyo Ghoul
-  "99423": "dr-stone", // Dr. Stone
-  "98707": "black-clover", // Black Clover
-  "11757": "sword-art-online", // Sword Art Online
-  "124": "fushigi-yuugi-eikoden", // Fushigi Yuugi: Eikoden (Mysterious Play: Eikoden)
+  "9253": "steins-gate", // Steins;Gate
+  "11061": "hunter-x-hunter-2011", // Hunter x Hunter (2011)
+  "30276": "one-punch-man", // One Punch Man
+  "124": "fushigi-yuugi-eikoden", // Fushigi Yuugi: Eikoden
+  // Add more popular anime mappings here
 };
 
 /**
- * Dynamic search for an anime on the target site using the AniList API information
- * @param {number|string} anilistId - The AniList ID to search for
- * @returns {Promise<string|null>} - The internal ID or null if not found
+ * Cleanses a title by normalizing it for comparison purposes.
+ * 
+ * @param {string} title - The title to be cleansed
+ * @returns {string} - The cleansed title
  */
-async function findInternalIdFromAnilist(anilistId) {
+function cleanseTitle(title) {
+  if (!title) return "";
+  return title
+    .toLowerCase()
+    .replace(/[^\w\s]/gi, '') // Remove special characters
+    .replace(/\s+/g, ' ')     // Replace multiple spaces with a single space
+    .trim();                  // Remove leading/trailing spaces
+}
+
+/**
+ * Get AniList anime info using their GraphQL API
+ * 
+ * @param {string} id - AniList ID of the anime
+ * @returns {Promise<Object>} - Anime information from AniList
+ */
+async function getAniListInfo(id) {
   try {
-    console.log(`[AniList] Searching for anime with AniList ID: ${anilistId}`);
-    
-    // Get anime details from AniList API with more info
-    const anilistQuery = `
-      query {
-        Media(id: ${anilistId}, type: ANIME) {
+    const query = `
+      query ($id: Int) {
+        Media (id: $id, type: ANIME) {
           id
-          idMal
           title {
             romaji
             english
             native
+            userPreferred
           }
+          synonyms
           format
           status
-          synonyms
-          seasonYear
+          description
           season
-          genres
+          seasonYear
+          episodes
         }
       }
     `;
+
+    const variables = { id: parseInt(id) };
     
-    const anilistResponse = await axios.post('https://graphql.anilist.co', {
-      query: anilistQuery
+    const response = await axios.post('https://graphql.anilist.co', {
+      query,
+      variables
     });
-    
-    if (!anilistResponse.data?.data?.Media) {
-      console.error(`[AniList] AniList API returned no data for ID: ${anilistId}`);
+
+    return response.data?.data?.Media;
+  } catch (error) {
+    console.error(`Error fetching AniList info for ID ${id}:`, error);
+    return null;
+  }
+}
+
+/**
+ * Calculates the similarity between two strings using a simplified approach.
+ * Returns a score between 0 and 1, with 1 being a perfect match.
+ * 
+ * @param {string} str1 - First string to compare
+ * @param {string} str2 - Second string to compare
+ * @returns {number} - Similarity score (0-1)
+ */
+function calculateSimilarity(str1, str2) {
+  if (!str1 || !str2) return 0;
+  
+  const s1 = cleanseTitle(str1);
+  const s2 = cleanseTitle(str2);
+  
+  // If exact match, return 1
+  if (s1 === s2) return 1;
+  
+  // If one is a substring of the other, higher similarity
+  if (s1.includes(s2) || s2.includes(s1)) {
+    const longerLength = Math.max(s1.length, s2.length);
+    const shorterLength = Math.min(s1.length, s2.length);
+    return shorterLength / longerLength * 0.9; // 0.9 factor for not being exact match
+  }
+  
+  // Check for word overlap
+  const words1 = s1.split(' ').filter(word => word.length > 2); // Only consider words with 3+ chars
+  const words2 = s2.split(' ').filter(word => word.length > 2);
+  
+  let matchCount = 0;
+  for (const word of words1) {
+    if (words2.includes(word)) {
+      matchCount++;
+    }
+  }
+  
+  // Calculate word match score
+  const maxWords = Math.max(words1.length, words2.length);
+  return maxWords > 0 ? matchCount / maxWords * 0.8 : 0; // 0.8 factor for word-level match
+}
+
+/**
+ * Attempts to find the internal ID for an anime based on title matching
+ * 
+ * @param {Array<string>} titleVariations - Different forms of the title to search for
+ * @returns {Promise<string|null>} - The internal ID if found, null otherwise
+ */
+async function findInternalIdByTitleSearch(titleVariations) {
+  try {
+    // Ensure we have valid title variations to search for
+    const validTitles = titleVariations.filter(title => title && typeof title === 'string');
+    if (validTitles.length === 0) {
       return null;
     }
-    
-    const animeData = anilistResponse.data.data.Media;
-    console.log(`[AniList] Found anime in AniList: ${animeData.title.english || animeData.title.romaji}`);
-    
-    // Additional step: Try to use MAL ID if available (many sites use these)
-    if (animeData.idMal) {
-      try {
-        console.log(`[AniList] Trying to use MAL ID: ${animeData.idMal}`);
-        const malSearchUrl = `https://${v1_base_url}/search?keyword=id:${animeData.idMal}`;
+
+    // Try exact matches first (with some basic normalization)
+    for (const title of validTitles) {
+      // Create a search-friendly version of the title
+      const searchTitle = encodeURIComponent(title.trim());
+      
+      // Search on the anime site
+      const searchResponse = await axios.get(`${v1_base_url}/search?keyword=${searchTitle}`);
+      const $ = cheerio.load(searchResponse.data);
+      
+      // Extract search results
+      const searchResults = [];
+      $('.film_list-wrap .flw-item').each((index, element) => {
+        const titleElement = $(element).find('.film-detail .film-name a');
+        const resultTitle = titleElement.text().trim();
+        const resultUrl = titleElement.attr('href');
         
-        const { data } = await axios.get(malSearchUrl);
-        const $ = cheerio.load(data);
-        
-        const animeItems = $('.flw-item');
-        if (animeItems.length > 0) {
-          const firstItem = animeItems.first();
-          const link = firstItem.find('.film-poster').attr('href');
-          
-          if (link) {
-            const internalId = link.split('/').pop();
-            console.log(`[AniList] Found via MAL ID: ${internalId}`);
-            
-            // Store in cache for future use
-            ANILIST_CACHE.set(anilistId, internalId);
-            
-            return internalId;
+        // Extract ID from URL (format: /anime/anime-slug)
+        let internalId = null;
+        if (resultUrl) {
+          const match = resultUrl.match(/\/anime\/([^/]+)/);
+          if (match && match[1]) {
+            internalId = match[1];
           }
         }
-      } catch (error) {
-        console.error(`[AniList] Error searching via MAL ID:`, error.message);
-      }
-    }
-    
-    // Prepare all possible search terms
-    const searchTerms = [
-      animeData.title.english,
-      animeData.title.romaji,
-      animeData.title.native,
-      ...(animeData.synonyms || [])
-    ].filter(Boolean);
-    
-    // Add additional search variations
-    const variations = [];
-    
-    // Add the first part of titles (for cases like "One Piece Movie 14: Stampede" -> "One Piece")
-    searchTerms.forEach(term => {
-      if (!term) return;
-      
-      // Split by colon for titles like "Series: Subtitle"
-      const colonSplit = term.split(':')[0].trim();
-      if (colonSplit && colonSplit !== term && colonSplit.includes(' ')) {
-        variations.push(colonSplit);
-      }
-      
-      // Split by hyphen for titles like "Series - Subtitle"
-      const hyphenSplit = term.split('-')[0].trim();
-      if (hyphenSplit && hyphenSplit !== term && hyphenSplit.includes(' ')) {
-        variations.push(hyphenSplit);
-      }
-      
-      // Split by season markers like S2, Season 2, etc.
-      const seasonSplit = term.split(/\s+Season\s+\d+/i)[0].trim();
-      if (seasonSplit && seasonSplit !== term) {
-        variations.push(seasonSplit);
-      }
-    });
-    
-    // Combine all search terms and remove duplicates
-    const allSearchTerms = [...new Set([...searchTerms, ...variations])];
-    
-    console.log(`[AniList] Search terms: ${JSON.stringify(allSearchTerms)}`);
-    
-    // Try each search term
-    for (const term of allSearchTerms) {
-      if (!term) continue;
-      
-      try {
-        const encodedTerm = encodeURIComponent(term);
-        const searchUrl = `https://${v1_base_url}/search?keyword=${encodedTerm}`;
         
-        console.log(`[AniList] Searching site with term: "${term}"`);
-        const { data } = await axios.get(searchUrl);
-        const $ = cheerio.load(data);
-        
-        const animeItems = $('.flw-item');
-        const resultCount = animeItems.length;
-        
-        if (resultCount > 0) {
-          console.log(`[AniList] Found ${resultCount} results for "${term}"`);
-          
-          // Extract all found titles for comparison
-          const foundAnimes = [];
-          animeItems.each((i, el) => {
-            const title = $(el).find('.film-detail .film-name').text().trim();
-            const link = $(el).find('.film-poster').attr('href');
-            if (link) {
-              const id = link.split('/').pop();
-              foundAnimes.push({ title, id });
-            }
+        if (internalId && resultTitle) {
+          searchResults.push({
+            title: resultTitle,
+            internalId,
+            similarity: calculateSimilarity(title, resultTitle)
           });
-          
-          console.log(`[AniList] Extracted ${foundAnimes.length} anime titles: ${JSON.stringify(foundAnimes.map(a => a.title))}`);
-          
-          // Try to find the best match
-          for (const anime of foundAnimes) {
-            if (isReasonableMatch(anime.title, term)) {
-              console.log(`[AniList] Found matching anime: "${anime.title}" with ID: ${anime.id}`);
-              
-              // Store in cache for future use
-              ANILIST_CACHE.set(anilistId, anime.id);
-              
-              return anime.id;
-            }
-          }
-          
-          // Try to match by year if available
-          if (animeData.seasonYear) {
-            for (const anime of foundAnimes) {
-              // Check if the title contains the year
-              if (anime.title.includes(animeData.seasonYear.toString())) {
-                console.log(`[AniList] Found year match (${animeData.seasonYear}): "${anime.title}" with ID: ${anime.id}`);
-                
-                // Store in cache for future use
-                ANILIST_CACHE.set(anilistId, anime.id);
-                
-                return anime.id;
-              }
-            }
-          }
-          
-          // If no good match, just return the first result
-          if (foundAnimes.length > 0) {
-            console.log(`[AniList] No exact match found, using first result: "${foundAnimes[0].title}" with ID: ${foundAnimes[0].id}`);
-            
-            // Store in cache for future use
-            ANILIST_CACHE.set(anilistId, foundAnimes[0].id);
-            
-            return foundAnimes[0].id;
-          }
         }
-      } catch (error) {
-        console.error(`[AniList] Error searching for term "${term}":`, error.message);
+      });
+      
+      // Sort by similarity
+      searchResults.sort((a, b) => b.similarity - a.similarity);
+      
+      // If we have a high confidence match (similarity > 0.7), use it
+      if (searchResults.length > 0 && searchResults[0].similarity > 0.7) {
+        console.log(`Found match for "${title}": ${searchResults[0].title} (${searchResults[0].internalId}) with similarity ${searchResults[0].similarity}`);
+        return searchResults[0].internalId;
       }
     }
     
-    // If we get here, we couldn't find the anime
-    console.log(`[AniList] Could not find anime for AniList ID: ${anilistId}`);
+    // If we reach here, we couldn't find a high-confidence match
     return null;
   } catch (error) {
-    console.error(`[AniList] Error in findInternalIdFromAnilist:`, error.message);
+    console.error("Error in title search:", error);
     return null;
   }
 }
 
 /**
- * Helper function to determine if two titles are a reasonable match
- * @param {string} title1 - First title
- * @param {string} title2 - Second title
- * @returns {boolean} - True if titles are a reasonable match
+ * Find the internal ID corresponding to an AniList ID
+ * 
+ * @param {string} anilistId - The AniList ID to find mapping for
+ * @returns {Promise<string|null>} - The internal ID if found, null otherwise
  */
-function isReasonableMatch(title1, title2) {
-  if (!title1 || !title2) return false;
-  
-  // Normalize titles for comparison
-  const normalize = (str) => str.toLowerCase().replace(/[^a-z0-9]/g, '');
-  
-  const normalizedTitle1 = normalize(title1);
-  const normalizedTitle2 = normalize(title2);
-  
-  // Log the comparison for debugging
-  console.log(`[AniList] Comparing titles: "${title1}" vs "${title2}"`);
-  console.log(`[AniList] Normalized: "${normalizedTitle1}" vs "${normalizedTitle2}"`);
-  
-  // Direct match
-  if (normalizedTitle1 === normalizedTitle2) {
-    console.log('[AniList] Direct match found');
-    return true;
-  }
-  
-  // Check if title1 contains title2 or vice versa
-  if (normalizedTitle1.includes(normalizedTitle2) || normalizedTitle2.includes(normalizedTitle1)) {
-    console.log('[AniList] Substring match found');
-    return true;
-  }
-  
-  // Calculate similarity score
-  const longerLength = Math.max(normalizedTitle1.length, normalizedTitle2.length);
-  if (longerLength === 0) return true;
-  
-  // Calculate Levenshtein distance
-  const distance = levenshteinDistance(normalizedTitle1, normalizedTitle2);
-  const similarityScore = (longerLength - distance) / longerLength;
-  
-  console.log(`[AniList] Similarity score: ${similarityScore}`);
-  
-  // Consider a match if similarity is high enough
-  return similarityScore > 0.7;
-}
-
-/**
- * Calculate Levenshtein distance between two strings
- * @param {string} str1 - First string
- * @param {string} str2 - Second string
- * @returns {number} - Levenshtein distance
- */
-function levenshteinDistance(str1, str2) {
-  const track = Array(str2.length + 1).fill(null).map(() => 
-    Array(str1.length + 1).fill(null));
-  
-  for (let i = 0; i <= str1.length; i += 1) {
-    track[0][i] = i;
-  }
-  
-  for (let j = 0; j <= str2.length; j += 1) {
-    track[j][0] = j;
-  }
-  
-  for (let j = 1; j <= str2.length; j += 1) {
-    for (let i = 1; i <= str1.length; i += 1) {
-      const indicator = str1[i - 1] === str2[j - 1] ? 0 : 1;
-      track[j][i] = Math.min(
-        track[j][i - 1] + 1, // deletion
-        track[j - 1][i] + 1, // insertion
-        track[j - 1][i - 1] + indicator, // substitution
-      );
+async function findInternalIdFromAnilist(anilistId) {
+  try {
+    // Step 1: Check direct mapping table
+    if (ANILIST_ID_MAPPING[anilistId]) {
+      console.log(`Using direct mapping for AniList ID ${anilistId}: ${ANILIST_ID_MAPPING[anilistId]}`);
+      return ANILIST_ID_MAPPING[anilistId];
     }
+
+    // Step 2: Check cache
+    if (ANILIST_CACHE.has(anilistId)) {
+      console.log(`Using cached mapping for AniList ID ${anilistId}: ${ANILIST_CACHE.get(anilistId)}`);
+      return ANILIST_CACHE.get(anilistId);
+    }
+
+    // Step 3: Get info from AniList API
+    const anilistInfo = await getAniListInfo(anilistId);
+    if (!anilistInfo) {
+      return null;
+    }
+
+    // Step 4: Collect all possible title variations for searching
+    const titleVariations = [
+      anilistInfo.title.english,
+      anilistInfo.title.romaji,
+      anilistInfo.title.userPreferred,
+      ...(anilistInfo.synonyms || [])
+    ].filter(Boolean); // Remove any undefined/null titles
+
+    // Step 5: Try to find a match based on title
+    const internalId = await findInternalIdByTitleSearch(titleVariations);
+    
+    // Step 6: If found, cache for future use
+    if (internalId) {
+      ANILIST_CACHE.set(anilistId, internalId);
+      console.log(`Mapped AniList ID ${anilistId} to internal ID ${internalId} (cached for future use)`);
+    }
+
+    return internalId;
+  } catch (error) {
+    console.error(`Error mapping AniList ID ${anilistId}:`, error);
+    return null;
   }
-  
-  return track[str2.length][str1.length];
 }
 
 /**
- * Get episodes by AniList ID
- * This function handles the mapping from AniList ID to internal ID
- * and fetches episodes accordingly
+ * Controller to get episode list by AniList ID
  */
 export const getEpisodesByAnilistId = async (req, res) => {
-  const { id } = req.params;
-  
-  console.log(`[AniList] Request received for AniList ID: ${id}`);
-  
   try {
-    let internalId = null;
+    const anilistId = req.params.id;
     
-    // Step 1: Check for direct mapping
-    if (ANILIST_ID_MAPPING[id]) {
-      internalId = ANILIST_ID_MAPPING[id];
-      console.log(`[AniList] Using direct mapping for AniList ID ${id}: ${internalId}`);
-    } 
-    // Step 2: Check cache
-    else if (ANILIST_CACHE.has(id)) {
-      internalId = ANILIST_CACHE.get(id);
-      console.log(`[AniList] Using cached mapping for AniList ID ${id}: ${internalId}`);
-    } 
-    // Step 3: Try to find dynamically
-    else {
-      internalId = await findInternalIdFromAnilist(id);
-      
-      if (!internalId) {
-        console.log(`[AniList] Could not find internal ID for AniList ID: ${id}`);
-        
-        // Try to get anime info to provide a helpful error message
-        try {
-          const anilistQuery = `
-            query {
-              Media(id: ${id}, type: ANIME) {
-                id
-                title {
-                  romaji
-                  english
-                }
-              }
-            }
-          `;
-          
-          const anilistResponse = await axios.post('https://graphql.anilist.co', {
-            query: anilistQuery
-          });
-          
-          if (anilistResponse.data?.data?.Media) {
-            const animeData = anilistResponse.data.data.Media;
-            const animeTitle = animeData.title.english || animeData.title.romaji;
-            
-            return {
-              success: false,
-              message: `Could not find "${animeTitle}" (AniList ID: ${id}) on our source. This anime might not be available.`
-            };
-          }
-        } catch (e) {
-          // Ignore errors in this section, we're just trying to get a better error message
-        }
-        
-        return {
+    if (!anilistId) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "AniList ID is required" 
+      });
+    }
+
+    // Find the internal ID that corresponds to this AniList ID
+    const internalId = await findInternalIdFromAnilist(anilistId);
+
+    if (!internalId) {
+      return res.json({
+        success: true,
+        results: {
           success: false,
-          message: `Could not find anime with AniList ID: ${id} on our source. This anime might not be available.`
-        };
-      }
+          message: `AniList ID ${anilistId} could not be found in our system. The anime might not be available on our source.`
+        }
+      });
     }
+
+    // Use the internal ID to get the episode list
+    const animeUrl = `${v1_base_url}/watch/${internalId}`;
+    const response = await axios.get(animeUrl);
+    const $ = cheerio.load(response.data);
     
-    // Now we have an internal ID, fetch the episodes
-    console.log(`[AniList] Fetching episodes for internal ID: ${internalId}`);
-    const data = await extractEpisodesList(encodeURIComponent(internalId));
-    
-    if (!data || (Array.isArray(data) && data.length === 0) || 
-        (typeof data === 'object' && Object.keys(data).length === 0)) {
-      console.error(`[AniList] No episodes found for internal ID: ${internalId}`);
-      return {
-        success: false,
-        message: `Episodes not found for AniList ID: ${id} (mapped to internal ID: ${internalId})`
-      };
-    }
-    
-    console.log(`[AniList] Successfully fetched episodes for internal ID: ${internalId}`);
-    console.log(`[AniList] Episode count: ${data.totalEpisodes || 'unknown'}`);
-    
-    // Add the AniList ID to the response
-    data.anilistId = parseInt(id);
-    
-    return {
+    const episodesList = await extractEpisodesList($, internalId);
+
+    return res.json({
       success: true,
-      results: data
-    };
+      results: {
+        success: true,
+        anilistId,
+        internalId,
+        episodes: episodesList
+      }
+    });
+
   } catch (error) {
-    console.error(`[AniList] Error:`, error);
-    return {
+    console.error("Error in getEpisodesByAnilistId:", error);
+    return res.status(500).json({
       success: false,
-      message: error.message || "An error occurred while fetching episodes"
-    };
+      error: "An error occurred while fetching the episodes"
+    });
   }
-}; 
+};
+
+export default {
+  getEpisodesByAnilistId
+};
